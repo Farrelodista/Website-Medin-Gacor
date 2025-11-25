@@ -30,6 +30,10 @@ import {
   Filter,
   SortAsc,
   Image as ImageIcon,
+  ZoomIn,
+  ZoomOut,
+  Move,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -44,6 +48,19 @@ export default function AnggotaAdminPage() {
   const [editingAnggota, setEditingAnggota] = useState<Anggota | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadingPhotoId, setUploadingPhotoId] = useState<string | null>(null);
+
+  // Photo adjustment modal state
+  const [showPhotoAdjustModal, setShowPhotoAdjustModal] = useState(false);
+  const [photoToAdjust, setPhotoToAdjust] = useState<{
+    anggotaId: string;
+    file?: File;
+    previewUrl: string;
+    isEditMode: boolean;
+  } | null>(null);
+  const [photoZoom, setPhotoZoom] = useState(100);
+  const [photoPosition, setPhotoPosition] = useState({ x: 50, y: 50 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
   // Filter & Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -178,19 +195,146 @@ export default function AnggotaAdminPage() {
     }
   };
 
-  const handlePhotoUpload = async (anggotaId: string, file: File) => {
-    setUploadingPhoto(true);
-    setUploadingPhotoId(anggotaId);
-    const result = await uploadFoto(file, anggotaId);
+  const handlePhotoSelect = (anggotaId: string, file: File) => {
+    // Create preview URL
+    const previewUrl = URL.createObjectURL(file);
+    setPhotoToAdjust({
+      anggotaId,
+      file,
+      previewUrl,
+      isEditMode: false,
+    });
+    setPhotoZoom(100);
+    setPhotoPosition({ x: 50, y: 50 });
+    setShowPhotoAdjustModal(true);
+  };
 
-    if (result.success) {
-      await fetchData();
-      alert('Foto berhasil diupload!');
-    } else {
-      alert(`Error: ${result.error}`);
+  const handlePhotoEdit = (anggotaId: string, fotoUrl: string) => {
+    // Use existing photo URL for editing
+    const previewUrl = getFotoUrl(fotoUrl) || '';
+    setPhotoToAdjust({
+      anggotaId,
+      previewUrl,
+      isEditMode: true,
+    });
+    setPhotoZoom(100);
+    setPhotoPosition({ x: 50, y: 50 });
+    setShowPhotoAdjustModal(true);
+  };
+
+  const handlePhotoUpload = async () => {
+    if (!photoToAdjust) return;
+
+    setUploadingPhoto(true);
+    setUploadingPhotoId(photoToAdjust.anggotaId);
+    setShowPhotoAdjustModal(false);
+
+    // Create canvas to apply zoom and position
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      alert('Error: Canvas tidak didukung');
+      setUploadingPhoto(false);
+      setUploadingPhotoId(null);
+      return;
     }
-    setUploadingPhoto(false);
-    setUploadingPhotoId(null);
+
+    const img = new Image();
+    img.src = photoToAdjust.previewUrl;
+
+    // For edit mode with existing photos, we need to enable CORS
+    if (photoToAdjust.isEditMode) {
+      img.crossOrigin = 'anonymous';
+    }
+
+    await new Promise((resolve) => {
+      img.onload = resolve;
+    });
+
+    // Set canvas size (output size)
+    const outputWidth = 800;
+    const outputHeight = 800;
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+
+    // Calculate zoom and position
+    const scale = photoZoom / 100;
+    const imgWidth = img.width * scale;
+    const imgHeight = img.height * scale;
+
+    // Position (percentage to pixels)
+    const offsetX = (photoPosition.x / 100) * (outputWidth - imgWidth);
+    const offsetY = (photoPosition.y / 100) * (outputHeight - imgHeight);
+
+    // Draw image with transformations
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, outputWidth, outputHeight);
+    ctx.drawImage(img, offsetX, offsetY, imgWidth, imgHeight);
+
+    // Convert canvas to blob
+    canvas.toBlob(async (blob) => {
+      if (!blob) {
+        alert('Error: Gagal memproses foto');
+        setUploadingPhoto(false);
+        setUploadingPhotoId(null);
+        return;
+      }
+
+      const fileName = photoToAdjust.file?.name || `photo_${photoToAdjust.anggotaId}.jpg`;
+      const processedFile = new File([blob], fileName, {
+        type: 'image/jpeg',
+      });
+
+      const result = await uploadFoto(processedFile, photoToAdjust.anggotaId);
+
+      if (result.success) {
+        await fetchData();
+        alert(photoToAdjust.isEditMode ? 'Foto berhasil diupdate!' : 'Foto berhasil diupload!');
+      } else {
+        alert(`Error: ${result.error}`);
+      }
+
+      // Clean up
+      if (!photoToAdjust.isEditMode) {
+        URL.revokeObjectURL(photoToAdjust.previewUrl);
+      }
+      setPhotoToAdjust(null);
+      setUploadingPhoto(false);
+      setUploadingPhotoId(null);
+    }, 'image/jpeg', 0.9);
+  };
+
+  const handleCancelPhotoAdjust = () => {
+    if (photoToAdjust && !photoToAdjust.isEditMode) {
+      URL.revokeObjectURL(photoToAdjust.previewUrl);
+    }
+    setPhotoToAdjust(null);
+    setShowPhotoAdjustModal(false);
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    setIsDragging(true);
+    setDragStart({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+
+    const deltaX = e.clientX - dragStart.x;
+    const deltaY = e.clientY - dragStart.y;
+
+    // Convert pixel delta to percentage (adjust sensitivity)
+    // Invert direction: drag right = move image right (decrease x%), drag down = move image down (decrease y%)
+    const sensitivity = 0.2;
+    const newX = Math.max(0, Math.min(100, photoPosition.x - deltaX * sensitivity));
+    const newY = Math.max(0, Math.min(100, photoPosition.y - deltaY * sensitivity));
+
+    setPhotoPosition({ x: newX, y: newY });
+    setDragStart({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
   };
 
   const handlePhotoDelete = async (anggotaId: string) => {
@@ -408,7 +552,7 @@ export default function AnggotaAdminPage() {
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           if (file) {
-                            handlePhotoUpload(anggota.id, file);
+                            handlePhotoSelect(anggota.id, file);
                             e.target.value = '';
                           }
                         }}
@@ -416,14 +560,25 @@ export default function AnggotaAdminPage() {
                       />
                     </label>
                     {anggota.foto_url && (
-                      <button
-                        onClick={() => handlePhotoDelete(anggota.id)}
-                        className="bg-red-500/90 backdrop-blur-sm p-2 rounded-lg hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                        disabled={uploadingPhoto && uploadingPhotoId === anggota.id}
-                        title="Hapus foto"
-                      >
-                        <Trash2 className="h-4 w-4 text-white" />
-                      </button>
+                      <>
+                        <button
+                          onClick={() => anggota.foto_url && handlePhotoEdit(anggota.id, anggota.foto_url)}
+                          className="bg-blue-600/90 backdrop-blur-sm px-3 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                          disabled={uploadingPhoto && uploadingPhotoId === anggota.id}
+                          title="Edit zoom & posisi foto"
+                        >
+                          <Edit2 className="h-4 w-4 text-white" />
+                          <span className="text-sm font-medium text-white">Edit</span>
+                        </button>
+                        <button
+                          onClick={() => handlePhotoDelete(anggota.id)}
+                          className="bg-red-500/90 backdrop-blur-sm p-2 rounded-lg hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={uploadingPhoto && uploadingPhotoId === anggota.id}
+                          title="Hapus foto"
+                        >
+                          <Trash2 className="h-4 w-4 text-white" />
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -704,6 +859,142 @@ export default function AnggotaAdminPage() {
                   </Button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Photo Adjustment Modal */}
+      {showPhotoAdjustModal && photoToAdjust && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold text-gray-900">
+                  {photoToAdjust.isEditMode ? 'Edit Posisi & Zoom Foto' : 'Atur Posisi & Zoom Foto'}
+                </h3>
+                <button
+                  onClick={handleCancelPhotoAdjust}
+                  className="text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Preview */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-3">
+                    <Move className="h-4 w-4 inline mr-1" />
+                    Preview - Drag untuk menggeser posisi
+                  </label>
+                  <div
+                    className={`relative bg-gray-100 rounded-lg overflow-hidden aspect-square border-2 border-gray-300 ${
+                      isDragging ? 'cursor-grabbing' : 'cursor-grab'
+                    }`}
+                    onMouseDown={handleMouseDown}
+                    onMouseMove={handleMouseMove}
+                    onMouseUp={handleMouseUp}
+                    onMouseLeave={handleMouseUp}
+                  >
+                    <div
+                      className="absolute inset-0 select-none"
+                      style={{
+                        backgroundImage: `url(${photoToAdjust.previewUrl})`,
+                        backgroundSize: `${photoZoom}%`,
+                        backgroundPosition: `${photoPosition.x}% ${photoPosition.y}%`,
+                        backgroundRepeat: 'no-repeat',
+                      }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Posisi: {photoPosition.x.toFixed(0)}%, {photoPosition.y.toFixed(0)}% - Drag untuk menggeser
+                  </p>
+                </div>
+
+                {/* Controls */}
+                <div className="space-y-6">
+                  {/* Zoom Control */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-3">
+                      <ZoomIn className="h-4 w-4 inline mr-1" />
+                      Zoom: {photoZoom}%
+                    </label>
+                    <div className="space-y-2">
+                      <input
+                        type="range"
+                        min="50"
+                        max="200"
+                        step="5"
+                        value={photoZoom}
+                        onChange={(e) => setPhotoZoom(Number(e.target.value))}
+                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setPhotoZoom(Math.max(50, photoZoom - 10))}
+                          className="flex-1 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors"
+                        >
+                          <ZoomOut className="h-4 w-4 inline mr-1" />
+                          Zoom Out
+                        </button>
+                        <button
+                          onClick={() => setPhotoZoom(Math.min(200, photoZoom + 10))}
+                          className="flex-1 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors"
+                        >
+                          <ZoomIn className="h-4 w-4 inline mr-1" />
+                          Zoom In
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Reset Button */}
+                  <button
+                    onClick={() => {
+                      setPhotoZoom(100);
+                      setPhotoPosition({ x: 50, y: 50 });
+                    }}
+                    className="w-full px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    Reset ke Default
+                  </button>
+
+                  {/* Tips */}
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <p className="text-sm text-blue-800 mb-2">
+                      <strong>Cara Menggunakan:</strong>
+                    </p>
+                    <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
+                      <li>Gunakan slider untuk zoom in/out foto</li>
+                      <li>Drag foto di preview untuk menggeser posisi</li>
+                      <li>Klik tombol reset untuk kembali ke posisi default</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-3 mt-6 pt-6 border-t border-gray-200">
+                <Button
+                  type="button"
+                  onClick={handleCancelPhotoAdjust}
+                  variant="outline"
+                  className="flex-1"
+                >
+                  Batal
+                </Button>
+                <Button
+                  type="button"
+                  onClick={handlePhotoUpload}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700"
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  {photoToAdjust.isEditMode ? 'Simpan Perubahan' : 'Upload Foto'}
+                </Button>
+              </div>
             </div>
           </div>
         </div>
